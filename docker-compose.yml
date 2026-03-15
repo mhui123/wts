@@ -1,0 +1,130 @@
+# ---------------------------------------------------------------
+# WTS (Wealth Trading System) — 통합 실행 환경
+#
+# 사용법:
+#   1) cp .env.example .env  (선택: OAuth2·Kiwoom 키 설정 시 필요)
+#   2) docker-compose up -d --build
+#   3) 백엔드 API: http://localhost:9789
+#      Python API : http://localhost:19789
+#
+# 서비스 기동 순서: mysql → redis → python → backend
+# ---------------------------------------------------------------
+
+services:
+
+  # ── MySQL 8 ────────────────────────────────────────────────
+  mysql:
+    image: mysql:8
+    container_name: wts-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-1234}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-stockdb}
+      MYSQL_ROOT_HOST: "%"
+    ports:
+      - "3546:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+      # utf8mb4 문자셋 강제 설정 (한글 깨짐 방지)
+      - ./mysql-init/utf8mb4.cnf:/etc/mysql/conf.d/utf8mb4.cnf:ro
+      # 초기화 스크립트 (최초 기동 시 1회만 실행)
+      - ./mysql-init/init.sh:/docker-entrypoint-initdb.d/init.sh:ro
+      # SQL 파일은 /tmp/sql 에 마운트 (init.sh 에서 참조)
+      - ./01_schma.sql:/tmp/sql/01_schma.sql:ro
+      - ./02_seed_data.sql:/tmp/sql/02_seed_data.sql:ro
+    networks:
+      - wts-network
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -u root -p$$MYSQL_ROOT_PASSWORD"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
+  # ── Redis 7 ────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: wts-redis
+    ports:
+      - "6379:6379"
+    networks:
+      - wts-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  # ── Python (FastAPI) ────────────────────────────────────────
+  python:
+    build:
+      context: ./wts-python
+    container_name: wts-python
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      - "19789:19789"
+    environment:
+      DOCKER_ENV: "true"
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_DB: 0
+      API_HOST: 0.0.0.0
+      API_PORT: 19789
+    volumes:
+      - ./wts-python/logs:/app/logs
+    networks:
+      - wts-network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:19789/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
+  # ── Spring Boot Backend ────────────────────────────────────
+  backend:
+    build:
+      context: .                          # 루트를 context로 — 프론트엔드 소스도 포함
+      dockerfile: wts-backend/Dockerfile  # 멀티스테이지 빌드: Node → Gradle → JRE
+    container_name: wts-backend
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      python:
+        condition: service_started
+    ports:
+      - "9789:9789"
+    env_file:
+      - path: ./.env
+        required: false   # .env 없어도 기본값으로 실행 가능
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      # application-docker.yml 의 host.docker.internal 하드코딩을 오버라이드
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/${MYSQL_DATABASE:-stockdb}
+      SPRING_DATASOURCE_USERNAME: root
+      SPRING_DATASOURCE_PASSWORD: ${MYSQL_ROOT_PASSWORD:-1234}
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PORT: 6379
+      EXTERNAL_PYTHON_SERVER_BASE_URL: http://wts-python:19789
+      # OAuth2 / Kiwoom 시크릿 — .env 에서 로드되거나 기본 placeholder 사용
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-DEMO-NOT-SET}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-DEMO-NOT-SET}
+      KIWOOM_ENCRYPTION_SECRET: ${KIWOOM_ENCRYPTION_SECRET:-DEMO-NOT-SET}
+      KIWOOM_ENCRYPTION_SALT: ${KIWOOM_ENCRYPTION_SALT:-DEMO-NOT-SET}
+    networks:
+      - wts-network
+    restart: unless-stopped
+
+networks:
+  wts-network:
+    driver: bridge
+
+volumes:
+  mysql-data:

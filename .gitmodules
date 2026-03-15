@@ -1,0 +1,12 @@
+[submodule "wts-backend"]
+	path = wts-backend
+	url = https://github.com/mhui123/wts-backend.git
+        branch = master
+[submodule "wts-python"]
+        path = wts-python
+        url = https://github.com/mhui123/wts-python.git
+        branch = master
+[submodule "wts-frontend"]
+        path = wts-frontend
+        url = https://github.com/mhui123/wts-frontend.git
+        branch = master
